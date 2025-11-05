@@ -19,29 +19,6 @@ class GoldenRetrieverVerenigingScraper(BaseScraper):
             name="Golden Retriever Vereniging"
         )
 
-    def fetch_page(self):
-        """
-        Override fetch_page to use httpx HTTP/2 directly for this site.
-        Cloudscraper returns garbled HTML for this site.
-        """
-        import httpx
-
-        logger.info(f"Fetching page: {self.url}")
-
-        headers = self._get_headers()
-
-        # Use httpx HTTP/2 directly for this site
-        try:
-            with httpx.Client(http2=True, follow_redirects=True, timeout=30.0) as client:
-                response = client.get(self.url, headers=headers)
-                response.raise_for_status()
-                logger.info(f"✓ httpx HTTP/2 succeeded (status: {response.status_code})")
-                return BeautifulSoup(response.text, 'html.parser')
-        except Exception as e:
-            logger.error(f"httpx HTTP/2 failed: {str(e)}")
-            # Fallback to parent class methods
-            return super().fetch_page()
-
     def parse_litters(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
         """
         Parse litters from goldenretrieververeniging.nl.

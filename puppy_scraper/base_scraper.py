@@ -34,8 +34,13 @@ class BaseScraper(ABC):
         self.url = url
         self.name = name
         self.ua = UserAgent()
-        # Use cloudscraper instead of requests to bypass Cloudflare and anti-bot protection
-        self.scraper = cloudscraper.create_scraper(
+        # Don't create cloudscraper here - create fresh one for each request
+        self._scraper = None
+
+    def _get_scraper(self):
+        """Get a fresh cloudscraper instance."""
+        # Create a new scraper for each request to avoid session issues
+        return cloudscraper.create_scraper(
             browser={
                 'browser': 'chrome',
                 'platform': 'windows',
@@ -69,7 +74,31 @@ class BaseScraper(ABC):
         with httpx.Client(http2=True, follow_redirects=True, timeout=30.0) as client:
             response = client.get(url, headers=headers)
             response.raise_for_status()
-            return BeautifulSoup(response.content, 'html.parser')
+
+            # Debug logging
+            logger.debug(f"httpx response: status={response.status_code}, content_length={len(response.content)}, encoding={response.encoding}")
+            logger.debug(f"httpx response headers: {dict(response.headers)}")
+
+            # Handle Brotli compression manually for httpx too
+            content_encoding = response.headers.get('content-encoding', '').lower()
+            if content_encoding == 'br':
+                import brotli
+                try:
+                    decompressed = brotli.decompress(response.content)
+                    text_content = decompressed.decode('utf-8', errors='replace')
+                    logger.debug("Manually decompressed Brotli content (httpx)")
+                except Exception as e:
+                    logger.warning(f"Brotli decompression failed (httpx): {e}")
+                    text_content = response.text
+            else:
+                text_content = response.text
+
+            logger.debug(f"httpx text preview: {text_content[:200] if text_content else 'NO TEXT'}")
+
+            # Use lxml parser - pass text (string) instead of content (bytes)
+            soup = BeautifulSoup(text_content, 'lxml')
+            logger.debug(f"httpx soup h2 count: {len(soup.find_all('h2'))}")
+            return soup
 
     def _try_selenium(self, url: str) -> BeautifulSoup:
         """Try fetching with Selenium (headless Chrome)."""
@@ -106,7 +135,8 @@ class BaseScraper(ABC):
 
             # Get the page source
             page_source = driver.page_source
-            return BeautifulSoup(page_source, 'html.parser')
+            # Use lxml parser for better encoding handling
+            return BeautifulSoup(page_source, 'lxml')
 
         finally:
             if driver:
@@ -125,43 +155,63 @@ class BaseScraper(ABC):
         """
         logger.info(f"Fetching page: {self.url}")
 
-        # Add a small delay to be polite and avoid rate limiting
-        time.sleep(1)
+        # Add a delay to be polite and avoid rate limiting
+        time.sleep(2)
 
         # Extract base URL for referer
         from urllib.parse import urlparse
         parsed_url = urlparse(self.url)
         base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
-        # Strategy 1: Try cloudscraper with session establishment
+        # Strategy 1: Try cloudscraper with direct request (like standalone test)
         try:
-            logger.debug("Strategy 1: Trying cloudscraper with homepage visit...")
+            logger.debug("Strategy 1: Trying cloudscraper direct request...")
             headers = self._get_headers()
 
-            # Visit homepage first to establish cookies
-            try:
-                homepage_response = self.scraper.get(
-                    base_url,
-                    headers=headers,
-                    timeout=30,
-                    allow_redirects=True
-                )
-                logger.debug(f"Homepage response: {homepage_response.status_code}")
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning(f"Homepage visit failed: {str(e)}")
+            # Get a fresh scraper instance
+            scraper = self._get_scraper()
 
-            # Now fetch the actual page
-            headers_with_referer = self._get_headers(base_url)
-            response = self.scraper.get(
+            # Direct request to the target page (no homepage visit to avoid triggering blocks)
+            response = scraper.get(
                 self.url,
-                headers=headers_with_referer,
+                headers=headers,
                 timeout=30,
                 allow_redirects=True
             )
             response.raise_for_status()
             logger.info(f"✓ Strategy 1 succeeded (status: {response.status_code})")
-            return BeautifulSoup(response.content, 'html.parser')
+
+            # Debug logging for cloudscraper
+            logger.debug(f"cloudscraper response: content_length={len(response.content)}, encoding={response.encoding}")
+            logger.debug(f"cloudscraper content-encoding header: {response.headers.get('content-encoding', 'none')}")
+
+            # Handle Brotli compression manually
+            content_encoding = response.headers.get('content-encoding', '').lower()
+            if content_encoding == 'br':
+                # Manually decompress Brotli
+                import brotli
+                try:
+                    decompressed = brotli.decompress(response.content)
+                    text_content = decompressed.decode('utf-8', errors='replace')
+                    logger.debug("Manually decompressed Brotli content")
+                except Exception as e:
+                    logger.warning(f"Brotli decompression failed: {e}, using response.text")
+                    text_content = response.text
+            else:
+                text_content = response.text
+
+            logger.debug(f"cloudscraper text preview: {text_content[:200] if text_content else 'EMPTY'}")
+
+            # Use lxml parser with explicit from_encoding for better handling
+            # Pass the text (decoded string) instead of content (bytes) to avoid encoding issues
+            soup = BeautifulSoup(text_content, 'lxml')
+            h2_count = len(soup.find_all('h2'))
+            logger.debug(f"cloudscraper soup: h2_count={h2_count}")
+
+            if h2_count == 0:
+                logger.warning(f"No h2 tags found! Soup preview: {str(soup)[:500]}")
+
+            return soup
         except Exception as e1:
             logger.warning(f"Strategy 1 failed: {str(e1)}")
 
@@ -189,7 +239,23 @@ class BaseScraper(ABC):
                         response = client.get(self.url, headers=headers_with_referer)
                         response.raise_for_status()
                         logger.info(f"✓ Strategy 3 succeeded (status: {response.status_code})")
-                        return BeautifulSoup(response.content, 'html.parser')
+
+                        # Handle Brotli compression
+                        content_encoding = response.headers.get('content-encoding', '').lower()
+                        if content_encoding == 'br':
+                            import brotli
+                            try:
+                                decompressed = brotli.decompress(response.content)
+                                text_content = decompressed.decode('utf-8', errors='replace')
+                                logger.debug("Manually decompressed Brotli content (Strategy 3)")
+                            except Exception as e:
+                                logger.warning(f"Brotli decompression failed (Strategy 3): {e}")
+                                text_content = response.text
+                        else:
+                            text_content = response.text
+
+                        # Use lxml parser for better encoding handling
+                        return BeautifulSoup(text_content, 'lxml')
                 except Exception as e3:
                     logger.warning(f"Strategy 3 failed: {str(e3)}")
 
@@ -247,6 +313,14 @@ class BaseScraper(ABC):
             # Debug: Check if we got content
             h2_tags = soup.find_all('h2')
             logger.debug(f"Found {len(h2_tags)} h2 tags in {self.name}")
+
+            # More debug: check soup content
+            body = soup.find('body')
+            if body:
+                body_text = body.get_text(strip=True)[:200]
+                logger.debug(f"Body preview: {body_text}")
+            else:
+                logger.warning(f"No <body> tag found! HTML preview: {str(soup)[:300]}")
 
             litters = self.parse_litters(soup)
             logger.debug(f"Parsed {len(litters)} litters from {self.name}")

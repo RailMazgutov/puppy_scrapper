@@ -6,3 +6,4 @@ httpx[http2]>=0.25.0
 fake-useragent>=1.4.0
 selenium>=4.15.0
 webdriver-manager>=4.0.0
+brotli>=1.2.0
