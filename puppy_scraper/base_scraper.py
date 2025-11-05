@@ -9,6 +9,13 @@ import hashlib
 import logging
 import time
 from fake_useragent import UserAgent
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +70,47 @@ class BaseScraper(ABC):
             response = client.get(url, headers=headers)
             response.raise_for_status()
             return BeautifulSoup(response.content, 'html.parser')
+
+    def _try_selenium(self, url: str) -> BeautifulSoup:
+        """Try fetching with Selenium (headless Chrome)."""
+        logger.info("Trying Selenium with headless Chrome...")
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument(f'user-agent={self.ua.chrome}')
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+
+        driver = None
+        try:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+
+            # Set page load timeout
+            driver.set_page_load_timeout(30)
+
+            # Navigate to the page
+            driver.get(url)
+
+            # Wait for content to load (wait for body tag)
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+
+            # Give JavaScript time to render
+            time.sleep(2)
+
+            # Get the page source
+            page_source = driver.page_source
+            return BeautifulSoup(page_source, 'html.parser')
+
+        finally:
+            if driver:
+                driver.quit()
 
     def fetch_page(self) -> BeautifulSoup:
         """
@@ -143,11 +191,21 @@ class BaseScraper(ABC):
                         logger.info(f"✓ Strategy 3 succeeded (status: {response.status_code})")
                         return BeautifulSoup(response.content, 'html.parser')
                 except Exception as e3:
-                    logger.error(f"All strategies failed for {self.url}")
-                    logger.error(f"  - Strategy 1 (cloudscraper): {str(e1)}")
-                    logger.error(f"  - Strategy 2 (httpx HTTP/2): {str(e2)}")
-                    logger.error(f"  - Strategy 3 (httpx HTTP/2 with session): {str(e3)}")
-                    raise Exception(f"Failed to fetch {self.url} after trying all strategies")
+                    logger.warning(f"Strategy 3 failed: {str(e3)}")
+
+                    # Strategy 4: Try Selenium with headless Chrome
+                    try:
+                        logger.debug("Strategy 4: Trying Selenium with headless Chrome...")
+                        soup = self._try_selenium(self.url)
+                        logger.info("✓ Strategy 4 succeeded with Selenium")
+                        return soup
+                    except Exception as e4:
+                        logger.error(f"All strategies failed for {self.url}")
+                        logger.error(f"  - Strategy 1 (cloudscraper): {str(e1)}")
+                        logger.error(f"  - Strategy 2 (httpx HTTP/2): {str(e2)}")
+                        logger.error(f"  - Strategy 3 (httpx HTTP/2 with session): {str(e3)}")
+                        logger.error(f"  - Strategy 4 (Selenium): {str(e4)}")
+                        raise Exception(f"Failed to fetch {self.url} after trying all strategies")
 
     @abstractmethod
     def parse_litters(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
@@ -185,7 +243,13 @@ class BaseScraper(ABC):
         """
         try:
             soup = self.fetch_page()
+
+            # Debug: Check if we got content
+            h2_tags = soup.find_all('h2')
+            logger.debug(f"Found {len(h2_tags)} h2 tags in {self.name}")
+
             litters = self.parse_litters(soup)
+            logger.debug(f"Parsed {len(litters)} litters from {self.name}")
 
             # Add metadata to each litter
             for litter in litters:
@@ -197,5 +261,5 @@ class BaseScraper(ABC):
             return litters
 
         except Exception as e:
-            logger.error(f"Error scraping {self.name}: {str(e)}")
+            logger.error(f"Error scraping {self.name}: {str(e)}", exc_info=True)
             return []
