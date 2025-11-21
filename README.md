@@ -73,4 +73,4 @@ python demo_monitor.py
 
 ## Example
 
-See `screenshots/www_reyncomslant_nl_nieuws_demo.png` for an example of the type of screenshot captured by the monitor.
+See `screenshots/www_reyncomslant_nl_nieuws_df4d50d2.png` for an example screenshot captured from https://www.reyncomslant.nl/nieuws/
