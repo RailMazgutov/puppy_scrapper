@@ -16,10 +16,12 @@ Configuration:
     }
 """
 
+import asyncio
 import json
 import logging
 import os
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Set
@@ -141,6 +143,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "/list - Show all monitored URLs\n"
             "/add <url> - Add a new URL to monitor\n"
             "/remove <url> - Remove a URL from monitoring\n"
+            "/scan - Trigger a manual scan now\n"
             "/subscribe - Get notified when pages change\n"
             "/unsubscribe - Stop receiving notifications\n"
             "/status - Check your subscription status\n"
@@ -179,6 +182,7 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             "/list - Show all monitored URLs\n"
             "/add <url> - Add a new URL to monitor\n"
             "/remove <url> - Remove a URL from monitoring\n"
+            "/scan - Trigger a manual scan now\n"
             "/subscribe - Get notified when pages change\n"
             "/unsubscribe - Stop receiving notifications\n"
             "/status - Check your subscription status\n"
@@ -213,6 +217,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  Example: /add https://example.com\n"
         "/remove <url> - Remove a URL from monitoring\n"
         "  Example: /remove https://example.com\n"
+        "/scan - Trigger a manual scan now\n"
         "/subscribe - Get notified when pages change\n"
         "/unsubscribe - Stop receiving notifications\n"
         "/status - Check your subscription status\n"
@@ -482,6 +487,82 @@ async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(message, parse_mode="Markdown")
 
 
+# Track if a scan is currently running
+scan_in_progress = False
+
+
+async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /scan command - trigger a manual monitoring scan."""
+    global scan_in_progress
+    user_id = update.effective_user.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    if scan_in_progress:
+        await update.message.reply_text(
+            "⏳ A scan is already in progress. Please wait for it to complete."
+        )
+        return
+
+    scan_in_progress = True
+
+    await update.message.reply_text(
+        "🔍 *Starting manual scan...*\n\n"
+        "This may take a few minutes depending on the number of URLs.\n"
+        "You will be notified when the scan is complete.",
+        parse_mode="Markdown"
+    )
+
+    try:
+        # Run the web monitor script
+        web_monitor_script = SCRIPT_DIR / "web_monitor.py"
+
+        # Run in a subprocess asynchronously
+        process = await asyncio.create_subprocess_exec(
+            "python3", str(web_monitor_script), "--cron",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(SCRIPT_DIR)
+        )
+
+        stdout, stderr = await process.communicate()
+
+        # Load the run status to get results
+        run_status = load_run_status()
+
+        if process.returncode == 0 and run_status.get("last_run"):
+            last_run = run_status["last_run"]
+            result_message = (
+                "✅ *Scan completed successfully!*\n\n"
+                f"🌐 *URLs Checked:* {last_run['urls_checked']}\n"
+                f"🔄 *Changes Detected:* {last_run['changes_detected']}\n"
+                f"❗ *Errors:* {last_run['errors']}\n"
+                f"⏱ *Duration:* {last_run['duration_seconds']:.1f}s\n\n"
+                "Use /logs for more details."
+            )
+        else:
+            error_msg = stderr.decode() if stderr else "Unknown error"
+            result_message = (
+                f"❌ *Scan failed*\n\n"
+                f"Error: {error_msg[:200]}"
+            )
+
+        await update.message.reply_text(result_message, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error running scan: {e}")
+        await update.message.reply_text(
+            f"❌ *Error running scan:*\n{str(e)[:200]}",
+            parse_mode="Markdown"
+        )
+    finally:
+        scan_in_progress = False
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /cancel command during conversation."""
     await update.message.reply_text("Authentication cancelled. Use /start to try again.")
@@ -522,6 +603,7 @@ def main() -> None:
     application.add_handler(CommandHandler("unsubscribe", unsubscribe))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("logs", logs))
+    application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("logout", logout))
 
     # Start the bot
