@@ -26,9 +26,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Set
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -140,6 +141,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(
             "You are already authenticated!\n\n"
             "Available commands:\n"
+            "/menu - Show interactive menu\n"
             "/list - Show all monitored URLs\n"
             "/add <url> - Add a new URL to monitor\n"
             "/remove <url> - Remove a URL from monitoring\n"
@@ -178,7 +180,7 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         logger.info(f"User {user_id} authenticated successfully")
         await update.message.reply_text(
             "Authentication successful!\n\n"
-            "Available commands:\n"
+            "Use /menu for an interactive menu, or try:\n"
             "/list - Show all monitored URLs\n"
             "/add <url> - Add a new URL to monitor\n"
             "/remove <url> - Remove a URL from monitoring\n"
@@ -212,6 +214,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "URL Monitor Bot - Help\n\n"
         "Commands:\n"
+        "/menu - Show interactive menu\n"
         "/list - Show all monitored URLs\n"
         "/add <url> - Add a new URL to monitor\n"
         "  Example: /add https://example.com\n"
@@ -569,6 +572,259 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+def get_main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Create the main menu inline keyboard."""
+    keyboard = [
+        [
+            InlineKeyboardButton("📋 List URLs", callback_data="menu_list"),
+            InlineKeyboardButton("➕ Add URL", callback_data="menu_add"),
+        ],
+        [
+            InlineKeyboardButton("🔍 Scan Now", callback_data="menu_scan"),
+            InlineKeyboardButton("📊 Status", callback_data="menu_status"),
+        ],
+        [
+            InlineKeyboardButton("📜 Last Logs", callback_data="menu_logs"),
+            InlineKeyboardButton("🔔 Subscribe", callback_data="menu_subscribe"),
+        ],
+        [
+            InlineKeyboardButton("❓ Help", callback_data="menu_help"),
+            InlineKeyboardButton("🚪 Logout", callback_data="menu_logout"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /menu command - show interactive menu."""
+    user_id = update.effective_user.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    # Check subscription status for personalized menu
+    chat_id = update.effective_chat.id
+    subscribed = is_subscriber(chat_id)
+    sub_status = "🔔 Subscribed" if subscribed else "🔕 Not subscribed"
+
+    await update.message.reply_text(
+        f"🤖 *URL Monitor Bot Menu*\n\n"
+        f"Current status: {sub_status}\n\n"
+        f"Select an option below:",
+        reply_markup=get_main_menu_keyboard(),
+        parse_mode="Markdown"
+    )
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle menu button callbacks."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if not is_authenticated(user_id):
+        await query.edit_message_text(
+            "Session expired. Please use /start to authenticate again."
+        )
+        return
+
+    callback_data = query.data
+
+    if callback_data == "menu_list":
+        urls = load_urls()
+        if not urls:
+            message = "📋 *Monitored URLs*\n\nNo URLs are currently being monitored."
+        else:
+            message = "📋 *Monitored URLs*\n\n"
+            for i, url in enumerate(urls, 1):
+                message += f"{i}. {url}\n"
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+            ]]),
+            parse_mode="Markdown"
+        )
+
+    elif callback_data == "menu_add":
+        await query.edit_message_text(
+            "➕ *Add URL*\n\n"
+            "To add a URL, use the command:\n"
+            "`/add https://example.com`\n\n"
+            "Then use /menu to return here.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+            ]]),
+            parse_mode="Markdown"
+        )
+
+    elif callback_data == "menu_scan":
+        global scan_in_progress
+        if scan_in_progress:
+            await query.edit_message_text(
+                "⏳ A scan is already in progress. Please wait...",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+                ]])
+            )
+            return
+
+        scan_in_progress = True
+        await query.edit_message_text(
+            "🔍 *Scanning...*\n\n"
+            "Please wait while URLs are being checked.",
+            parse_mode="Markdown"
+        )
+
+        try:
+            web_monitor_script = SCRIPT_DIR / "web_monitor.py"
+            process = await asyncio.create_subprocess_exec(
+                "python3", str(web_monitor_script), "--cron",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(SCRIPT_DIR)
+            )
+            await process.communicate()
+            run_status = load_run_status()
+
+            if run_status.get("last_run"):
+                last_run = run_status["last_run"]
+                result_message = (
+                    "✅ *Scan Complete!*\n\n"
+                    f"🌐 URLs Checked: {last_run['urls_checked']}\n"
+                    f"🔄 Changes: {last_run['changes_detected']}\n"
+                    f"❗ Errors: {last_run['errors']}\n"
+                    f"⏱ Duration: {last_run['duration_seconds']:.1f}s"
+                )
+            else:
+                result_message = "✅ Scan completed."
+
+            await query.edit_message_text(
+                result_message,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+                ]]),
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ Scan error: {str(e)[:100]}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+                ]])
+            )
+        finally:
+            scan_in_progress = False
+
+    elif callback_data == "menu_status":
+        subscribed = is_subscriber(chat_id)
+        subscriber_count = len(load_subscribers())
+        status_emoji = "🔔" if subscribed else "🔕"
+        status_text = "subscribed" if subscribed else "not subscribed"
+
+        await query.edit_message_text(
+            f"📊 *Status*\n\n"
+            f"{status_emoji} You are currently *{status_text}*\n"
+            f"👥 Total subscribers: {subscriber_count}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+            ]]),
+            parse_mode="Markdown"
+        )
+
+    elif callback_data == "menu_logs":
+        run_status = load_run_status()
+        if not run_status or "last_run" not in run_status:
+            message = "📜 *Last Run*\n\nNo monitoring runs recorded yet."
+        else:
+            last_run = run_status["last_run"]
+            start_time = datetime.fromisoformat(last_run["start_time"])
+            status = last_run["status"]
+            status_emoji = "✅" if status == "success" else "⚠️" if status == "completed_with_errors" else "❌"
+
+            message = (
+                f"📜 *Last Run*\n\n"
+                f"🕐 {start_time.strftime('%Y-%m-%d %H:%M')}\n"
+                f"🌐 URLs: {last_run['urls_checked']}\n"
+                f"🔄 Changes: {last_run['changes_detected']}\n"
+                f"❗ Errors: {last_run['errors']}\n"
+                f"{status_emoji} Status: {status}"
+            )
+
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+            ]]),
+            parse_mode="Markdown"
+        )
+
+    elif callback_data == "menu_subscribe":
+        if is_subscriber(chat_id):
+            remove_subscriber(chat_id)
+            await query.edit_message_text(
+                "🔕 *Unsubscribed*\n\n"
+                "You will no longer receive change notifications.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+                ]]),
+                parse_mode="Markdown"
+            )
+        else:
+            add_subscriber(chat_id)
+            await query.edit_message_text(
+                "🔔 *Subscribed!*\n\n"
+                "You will receive notifications when pages change.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+                ]]),
+                parse_mode="Markdown"
+            )
+
+    elif callback_data == "menu_help":
+        await query.edit_message_text(
+            "❓ *Help*\n\n"
+            "This bot monitors web pages for changes.\n\n"
+            "*Commands:*\n"
+            "/menu - Show this menu\n"
+            "/list - Show monitored URLs\n"
+            "/add <url> - Add a URL\n"
+            "/remove <url> - Remove a URL\n"
+            "/scan - Trigger manual scan\n"
+            "/logs - Show last run details\n"
+            "/status - Check subscription\n"
+            "/help - Show all commands",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("« Back to Menu", callback_data="menu_back")
+            ]]),
+            parse_mode="Markdown"
+        )
+
+    elif callback_data == "menu_logout":
+        if user_id in authenticated_users:
+            authenticated_users.remove(user_id)
+        await query.edit_message_text(
+            "🚪 *Logged Out*\n\n"
+            "Use /start to authenticate again."
+        , parse_mode="Markdown")
+
+    elif callback_data == "menu_back":
+        subscribed = is_subscriber(chat_id)
+        sub_status = "🔔 Subscribed" if subscribed else "🔕 Not subscribed"
+        await query.edit_message_text(
+            f"🤖 *URL Monitor Bot Menu*\n\n"
+            f"Current status: {sub_status}\n\n"
+            f"Select an option below:",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="Markdown"
+        )
+
+
 def main() -> None:
     """Start the bot."""
     # Load configuration
@@ -596,6 +852,7 @@ def main() -> None:
     # Add handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("list", list_urls))
     application.add_handler(CommandHandler("add", add_url))
     application.add_handler(CommandHandler("remove", remove_url))
@@ -605,6 +862,7 @@ def main() -> None:
     application.add_handler(CommandHandler("logs", logs))
     application.add_handler(CommandHandler("scan", scan))
     application.add_handler(CommandHandler("logout", logout))
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
 
     # Start the bot
     logger.info("Starting URL Monitor Telegram Bot...")
