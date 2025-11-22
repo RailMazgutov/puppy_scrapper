@@ -2,14 +2,23 @@
 """
 Web Page Monitor Script
 Monitors web pages for changes by comparing HTML content and taking screenshots.
+Designed to run as a cronjob with configurable URL list.
 """
 
 import os
+import sys
 import hashlib
 import time
+import logging
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
+
+# Get the script's directory for resolving relative paths
+SCRIPT_DIR = Path(__file__).parent.resolve()
+DEFAULT_URLS_FILE = SCRIPT_DIR / "urls.txt"
+DEFAULT_LOG_FILE = SCRIPT_DIR / "monitor.log"
 
 
 class WebPageMonitor:
@@ -127,20 +136,137 @@ class WebPageMonitor:
         print("\n✅ Monitoring complete!")
 
 
+def setup_logging(log_file=None, verbose=False):
+    """Setup logging for both file and console output."""
+    log_file = log_file or DEFAULT_LOG_FILE
+
+    # Create logger
+    logger = logging.getLogger('web_monitor')
+    logger.setLevel(logging.DEBUG)
+
+    # Clear existing handlers
+    logger.handlers.clear()
+
+    # File handler - always logs
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    file_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_format)
+    logger.addHandler(file_handler)
+
+    # Console handler - for interactive use
+    if verbose or sys.stdout.isatty():
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_format = logging.Formatter('%(message)s')
+        console_handler.setFormatter(console_format)
+        logger.addHandler(console_handler)
+
+    return logger
+
+
+def load_urls_from_file(urls_file=None):
+    """Load URLs from a configuration file.
+
+    Args:
+        urls_file: Path to the URLs file. Defaults to urls.txt in script directory.
+
+    Returns:
+        List of URLs to monitor.
+    """
+    urls_file = Path(urls_file) if urls_file else DEFAULT_URLS_FILE
+
+    if not urls_file.exists():
+        raise FileNotFoundError(
+            f"URLs file not found: {urls_file}\n"
+            f"Please create the file with one URL per line."
+        )
+
+    urls = []
+    with open(urls_file, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            # Skip empty lines and comments
+            if not line or line.startswith('#'):
+                continue
+            # Basic URL validation
+            if line.startswith('http://') or line.startswith('https://'):
+                urls.append(line)
+            else:
+                print(f"Warning: Skipping invalid URL on line {line_num}: {line}")
+
+    return urls
+
+
 def main():
     """Main entry point."""
-    # List of URLs to monitor
-    urls = [
-        "https://www.reyncomslant.nl/nieuws/",
-        # Add more URLs to monitor here
-        # "https://example.com/page1",
-        # "https://example.com/page2",
-    ]
+    import argparse
 
-    # Create monitor and check URLs
-    monitor = WebPageMonitor()
-    monitor.monitor_urls(urls)
+    parser = argparse.ArgumentParser(
+        description='Monitor web pages for changes',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python web_monitor.py                    # Use default urls.txt
+  python web_monitor.py -f my_urls.txt     # Use custom URL file
+  python web_monitor.py -v                 # Verbose output
+  python web_monitor.py --cron             # Cron mode (quiet, log only)
+        """
+    )
+    parser.add_argument(
+        '-f', '--file',
+        help='Path to URLs configuration file (default: urls.txt)',
+        default=None
+    )
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Enable verbose output'
+    )
+    parser.add_argument(
+        '--cron',
+        action='store_true',
+        help='Run in cron mode (suppress console output, log to file only)'
+    )
+    parser.add_argument(
+        '--log-file',
+        help='Path to log file (default: monitor.log)',
+        default=None
+    )
+
+    args = parser.parse_args()
+
+    # Setup logging
+    verbose = args.verbose and not args.cron
+    logger = setup_logging(args.log_file, verbose)
+
+    logger.info(f"{'='*50}")
+    logger.info(f"Web Monitor started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    try:
+        # Load URLs from file
+        urls = load_urls_from_file(args.file)
+
+        if not urls:
+            logger.warning("No URLs found in configuration file")
+            return 1
+
+        logger.info(f"Loaded {len(urls)} URL(s) to monitor")
+
+        # Create monitor and check URLs
+        monitor = WebPageMonitor()
+        monitor.monitor_urls(urls)
+
+        logger.info("Monitoring completed successfully")
+        return 0
+
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        return 1
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
