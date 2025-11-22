@@ -9,6 +9,7 @@ A Python script that monitors web pages for changes by comparing HTML content an
 - Compares current HTML with previous snapshots
 - Takes screenshots when changes are detected
 - Organizes screenshots and HTML snapshots in separate folders
+- **Telegram Bot** for managing URLs remotely (add/remove URLs via Telegram)
 
 ## Installation
 
@@ -115,6 +116,82 @@ A simplified demo script (`demo_monitor.py`) is included that demonstrates the H
 
 ```bash
 python demo_monitor.py
+```
+
+## Telegram Bot
+
+A Telegram bot is included for managing monitored URLs remotely from your phone or desktop.
+
+### Setup
+
+1. **Create a Telegram Bot:**
+   - Message [@BotFather](https://t.me/BotFather) on Telegram
+   - Send `/newbot` and follow the instructions
+   - Copy the bot token you receive
+
+2. **Configure the bot:**
+   ```bash
+   cp telegram_config.json.example telegram_config.json
+   ```
+
+   Edit `telegram_config.json`:
+   ```json
+   {
+       "bot_token": "YOUR_TELEGRAM_BOT_TOKEN_HERE",
+       "access_password": "YOUR_SECRET_PASSWORD_HERE"
+   }
+   ```
+
+3. **Run the bot:**
+   ```bash
+   python telegram_bot.py
+   ```
+
+### Bot Commands
+
+After starting the bot, message it on Telegram:
+
+1. `/start` - Begin authentication (enter the access password)
+2. `/list` - Show all monitored URLs
+3. `/add <url>` - Add a new URL to monitor
+4. `/remove <url>` - Remove a URL from monitoring
+5. `/help` - Show help message
+6. `/logout` - Log out from the bot
+
+### Running as a Background Service
+
+To keep the bot running on your desktop:
+
+**Linux (systemd):**
+```bash
+# Create a service file
+sudo nano /etc/systemd/system/url-monitor-bot.service
+```
+
+```ini
+[Unit]
+Description=URL Monitor Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/puppy_scrapper
+ExecStart=/usr/bin/python3 telegram_bot.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable url-monitor-bot
+sudo systemctl start url-monitor-bot
+```
+
+**Or simply run in background:**
+```bash
+nohup python telegram_bot.py &
 ```
 
 ## Example
