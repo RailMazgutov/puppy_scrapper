@@ -57,12 +57,51 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 CONFIG_FILE = SCRIPT_DIR / "telegram_config.json"
 URLS_FILE = SCRIPT_DIR / "urls.txt"
 RUN_STATUS_FILE = SCRIPT_DIR / "run_status.json"
+AUTH_USERS_FILE = SCRIPT_DIR / "authenticated_users.json"
 
 # Conversation states
 WAITING_PASSWORD = 0
 
 # Store authenticated user IDs
 authenticated_users: Set[int] = set()
+
+
+def load_authenticated_users() -> Set[int]:
+    """Load authenticated users from persistent storage."""
+    if not AUTH_USERS_FILE.exists():
+        return set()
+
+    try:
+        with open(AUTH_USERS_FILE, "r") as f:
+            data = json.load(f)
+            return set(data.get("users", []))
+    except (json.JSONDecodeError, IOError):
+        return set()
+
+
+def save_authenticated_users() -> None:
+    """Save authenticated users to persistent storage."""
+    with open(AUTH_USERS_FILE, "w") as f:
+        json.dump({"users": list(authenticated_users)}, f, indent=2)
+
+
+def add_authenticated_user(user_id: int) -> None:
+    """Add a user to authenticated set and persist."""
+    authenticated_users.add(user_id)
+    save_authenticated_users()
+
+
+def remove_authenticated_user(user_id: int) -> None:
+    """Remove a user from authenticated set and persist."""
+    authenticated_users.discard(user_id)
+    save_authenticated_users()
+
+
+def init_authenticated_users() -> None:
+    """Initialize authenticated users from persistent storage."""
+    global authenticated_users
+    authenticated_users = load_authenticated_users()
+    logger.info(f"Loaded {len(authenticated_users)} authenticated user(s) from storage")
 
 
 def load_config() -> dict:
@@ -176,7 +215,7 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     config = load_config()
 
     if password == config["access_password"]:
-        authenticated_users.add(user_id)
+        add_authenticated_user(user_id)
         logger.info(f"User {user_id} authenticated successfully")
         await update.message.reply_text(
             "Authentication successful!\n\n"
@@ -337,7 +376,7 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
 
     if user_id in authenticated_users:
-        authenticated_users.remove(user_id)
+        remove_authenticated_user(user_id)
         logger.info(f"User {user_id} logged out")
         await update.message.reply_text(
             "You have been logged out. Use /start to authenticate again."
@@ -807,7 +846,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     elif callback_data == "menu_logout":
         if user_id in authenticated_users:
-            authenticated_users.remove(user_id)
+            remove_authenticated_user(user_id)
         await query.edit_message_text(
             "🚪 *Logged Out*\n\n"
             "Use /start to authenticate again."
@@ -834,6 +873,9 @@ def main() -> None:
         logger.error(f"Configuration error: {e}")
         print(f"Error: {e}")
         return
+
+    # Load authenticated users from persistent storage
+    init_authenticated_users()
 
     # Create the Application
     application = Application.builder().token(config["bot_token"]).build()
