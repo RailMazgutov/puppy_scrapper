@@ -1,0 +1,9 @@
+# URL Configuration File for Web Page Monitor
+# Add one URL per line
+# Lines starting with # are comments and will be ignored
+# Empty lines are also ignored
+
+# Example URLs to monitor:
+https://www.reyncomslant.nl/nieuws/
+
+# Add your URLs below:
