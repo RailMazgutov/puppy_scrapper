@@ -5,6 +5,7 @@ Monitors web pages for changes by comparing HTML content and taking screenshots.
 Designed to run as a cronjob with configurable URL list.
 """
 
+import json
 import os
 import sys
 import hashlib
@@ -26,6 +27,39 @@ except ImportError:
 SCRIPT_DIR = Path(__file__).parent.resolve()
 DEFAULT_URLS_FILE = SCRIPT_DIR / "urls.txt"
 DEFAULT_LOG_FILE = SCRIPT_DIR / "monitor.log"
+RUN_STATUS_FILE = SCRIPT_DIR / "run_status.json"
+
+
+def save_run_status(start_time: datetime, urls_checked: int, changes_detected: int,
+                    errors: int, status: str) -> None:
+    """Save the latest run status to a JSON file for tracking."""
+    end_time = datetime.now()
+    run_data = {
+        "last_run": {
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "duration_seconds": (end_time - start_time).total_seconds(),
+            "urls_checked": urls_checked,
+            "changes_detected": changes_detected,
+            "errors": errors,
+            "status": status
+        }
+    }
+
+    with open(RUN_STATUS_FILE, "w") as f:
+        json.dump(run_data, f, indent=2)
+
+
+def load_run_status() -> dict:
+    """Load the latest run status from JSON file."""
+    if not RUN_STATUS_FILE.exists():
+        return {}
+
+    try:
+        with open(RUN_STATUS_FILE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
 
 
 class WebPageMonitor:
@@ -74,11 +108,17 @@ class WebPageMonitor:
         return screenshot_file
 
     def monitor_url(self, url, browser):
-        """Monitor a single URL for changes."""
+        """Monitor a single URL for changes.
+
+        Returns:
+            tuple: (changed: bool, error: bool) indicating if change was detected and if error occurred
+        """
         print(f"\n🔍 Checking: {url}")
 
         filename = self._get_filename_from_url(url)
         previous_html = self._load_previous_html(filename)
+        changed = False
+        error = False
 
         try:
             # Create a new page
@@ -103,6 +143,7 @@ class WebPageMonitor:
                 print("  ✅ No changes detected")
             else:
                 print("  ⚠️  CHANGES DETECTED!")
+                changed = True
                 screenshot_path = self._take_screenshot(page, filename)
                 self._save_html(filename, current_html)
                 print(f"  💾 Updated HTML snapshot saved")
@@ -120,10 +161,20 @@ class WebPageMonitor:
 
         except Exception as e:
             print(f"  ❌ Error monitoring {url}: {str(e)}")
+            error = True
+
+        return changed, error
 
     def monitor_urls(self, urls):
-        """Monitor multiple URLs."""
+        """Monitor multiple URLs.
+
+        Returns:
+            tuple: (changes_detected: int, errors: int) counts of changes and errors
+        """
         print(f"🚀 Starting web page monitoring for {len(urls)} URL(s)")
+
+        changes_detected = 0
+        errors = 0
 
         # Get proxy settings from environment
         proxy_server = os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY')
@@ -145,11 +196,16 @@ class WebPageMonitor:
             )
 
             for url in urls:
-                self.monitor_url(url, browser)
+                changed, error = self.monitor_url(url, browser)
+                if changed:
+                    changes_detected += 1
+                if error:
+                    errors += 1
 
             browser.close()
 
         print("\n✅ Monitoring complete!")
+        return changes_detected, errors
 
 
 def setup_logging(log_file=None, verbose=False):
@@ -257,7 +313,13 @@ Examples:
     logger = setup_logging(args.log_file, verbose)
 
     logger.info(f"{'='*50}")
-    logger.info(f"Web Monitor started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    start_time = datetime.now()
+    logger.info(f"Web Monitor started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    urls_checked = 0
+    changes_detected = 0
+    errors = 0
+    status = "success"
 
     try:
         # Load URLs from file
@@ -265,22 +327,31 @@ Examples:
 
         if not urls:
             logger.warning("No URLs found in configuration file")
+            save_run_status(start_time, 0, 0, 0, "no_urls")
             return 1
 
-        logger.info(f"Loaded {len(urls)} URL(s) to monitor")
+        urls_checked = len(urls)
+        logger.info(f"Loaded {urls_checked} URL(s) to monitor")
 
         # Create monitor and check URLs
         monitor = WebPageMonitor()
-        monitor.monitor_urls(urls)
+        changes_detected, errors = monitor.monitor_urls(urls)
 
+        if errors > 0:
+            status = "completed_with_errors"
         logger.info("Monitoring completed successfully")
+
+        # Save run status
+        save_run_status(start_time, urls_checked, changes_detected, errors, status)
         return 0
 
     except FileNotFoundError as e:
         logger.error(str(e))
+        save_run_status(start_time, urls_checked, changes_detected, errors, "file_not_found")
         return 1
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
+        save_run_status(start_time, urls_checked, changes_detected, errors, "error")
         return 1
 
 
