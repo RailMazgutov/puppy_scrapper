@@ -33,6 +33,14 @@ from telegram.ext import (
     filters,
 )
 
+# Import notifier for subscriber management
+from telegram_notifier import (
+    add_subscriber,
+    remove_subscriber,
+    is_subscriber,
+    load_subscribers,
+)
+
 # Configure logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -131,6 +139,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "/list - Show all monitored URLs\n"
             "/add <url> - Add a new URL to monitor\n"
             "/remove <url> - Remove a URL from monitoring\n"
+            "/subscribe - Get notified when pages change\n"
+            "/unsubscribe - Stop receiving notifications\n"
+            "/status - Check your subscription status\n"
             "/help - Show this help message\n"
             "/logout - Log out from the bot"
         )
@@ -165,6 +176,9 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             "/list - Show all monitored URLs\n"
             "/add <url> - Add a new URL to monitor\n"
             "/remove <url> - Remove a URL from monitoring\n"
+            "/subscribe - Get notified when pages change\n"
+            "/unsubscribe - Stop receiving notifications\n"
+            "/status - Check your subscription status\n"
             "/help - Show this help message\n"
             "/logout - Log out from the bot"
         )
@@ -195,9 +209,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  Example: /add https://example.com\n"
         "/remove <url> - Remove a URL from monitoring\n"
         "  Example: /remove https://example.com\n"
+        "/subscribe - Get notified when pages change\n"
+        "/unsubscribe - Stop receiving notifications\n"
+        "/status - Check your subscription status\n"
         "/help - Show this help message\n"
         "/logout - Log out from the bot\n\n"
-        "Note: URLs must start with http:// or https://"
+        "Note: URLs must start with http:// or https://\n\n"
+        "📢 Notifications: When a monitored page changes, subscribers "
+        "will receive a screenshot and a link to the page."
     )
 
 
@@ -314,6 +333,82 @@ async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("You are not currently logged in.")
 
 
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /subscribe command - subscribe to change notifications."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    if add_subscriber(chat_id):
+        logger.info(f"User {user_id} subscribed to notifications (chat_id: {chat_id})")
+        await update.message.reply_text(
+            "✅ You are now subscribed to change notifications!\n\n"
+            "You will receive a message with a screenshot whenever a monitored "
+            "page changes.\n\n"
+            "Use /unsubscribe to stop receiving notifications."
+        )
+    else:
+        await update.message.reply_text(
+            "You are already subscribed to notifications.\n"
+            "Use /unsubscribe to stop receiving notifications."
+        )
+
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /unsubscribe command - unsubscribe from change notifications."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    if remove_subscriber(chat_id):
+        logger.info(f"User {user_id} unsubscribed from notifications (chat_id: {chat_id})")
+        await update.message.reply_text(
+            "✅ You have been unsubscribed from change notifications.\n\n"
+            "Use /subscribe to start receiving notifications again."
+        )
+    else:
+        await update.message.reply_text(
+            "You are not currently subscribed to notifications.\n"
+            "Use /subscribe to start receiving notifications."
+        )
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /status command - show subscription status."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    subscribed = is_subscriber(chat_id)
+    subscriber_count = len(load_subscribers())
+
+    status_emoji = "🔔" if subscribed else "🔕"
+    status_text = "subscribed" if subscribed else "not subscribed"
+
+    await update.message.reply_text(
+        f"📊 *Notification Status*\n\n"
+        f"{status_emoji} You are currently *{status_text}* to notifications.\n"
+        f"👥 Total subscribers: {subscriber_count}\n\n"
+        f"Use /subscribe or /unsubscribe to change your status.",
+        parse_mode="Markdown"
+    )
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /cancel command during conversation."""
     await update.message.reply_text("Authentication cancelled. Use /start to try again.")
@@ -350,6 +445,9 @@ def main() -> None:
     application.add_handler(CommandHandler("list", list_urls))
     application.add_handler(CommandHandler("add", add_url))
     application.add_handler(CommandHandler("remove", remove_url))
+    application.add_handler(CommandHandler("subscribe", subscribe))
+    application.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("logout", logout))
 
     # Start the bot
