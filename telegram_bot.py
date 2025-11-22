@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Set
 
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 SCRIPT_DIR = Path(__file__).parent.resolve()
 CONFIG_FILE = SCRIPT_DIR / "telegram_config.json"
 URLS_FILE = SCRIPT_DIR / "urls.txt"
+RUN_STATUS_FILE = SCRIPT_DIR / "run_status.json"
 
 # Conversation states
 WAITING_PASSWORD = 0
@@ -142,6 +144,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "/subscribe - Get notified when pages change\n"
             "/unsubscribe - Stop receiving notifications\n"
             "/status - Check your subscription status\n"
+            "/logs - Show last monitoring run status\n"
             "/help - Show this help message\n"
             "/logout - Log out from the bot"
         )
@@ -179,6 +182,7 @@ async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             "/subscribe - Get notified when pages change\n"
             "/unsubscribe - Stop receiving notifications\n"
             "/status - Check your subscription status\n"
+            "/logs - Show last monitoring run status\n"
             "/help - Show this help message\n"
             "/logout - Log out from the bot"
         )
@@ -212,6 +216,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/subscribe - Get notified when pages change\n"
         "/unsubscribe - Stop receiving notifications\n"
         "/status - Check your subscription status\n"
+        "/logs - Show last monitoring run status\n"
         "/help - Show this help message\n"
         "/logout - Log out from the bot\n\n"
         "Note: URLs must start with http:// or https://\n\n"
@@ -409,6 +414,74 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def load_run_status() -> dict:
+    """Load the latest run status from JSON file."""
+    if not RUN_STATUS_FILE.exists():
+        return {}
+
+    try:
+        with open(RUN_STATUS_FILE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+async def logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /logs command - show last cronjob run status."""
+    user_id = update.effective_user.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    run_status = load_run_status()
+
+    if not run_status or "last_run" not in run_status:
+        await update.message.reply_text(
+            "📋 *Last Run Status*\n\n"
+            "No monitoring runs recorded yet.",
+            parse_mode="Markdown"
+        )
+        return
+
+    last_run = run_status["last_run"]
+
+    # Parse timestamps
+    start_time = datetime.fromisoformat(last_run["start_time"])
+    end_time = datetime.fromisoformat(last_run["end_time"])
+
+    # Format status with emoji
+    status = last_run["status"]
+    if status == "success":
+        status_emoji = "✅"
+        status_text = "Success"
+    elif status == "completed_with_errors":
+        status_emoji = "⚠️"
+        status_text = "Completed with errors"
+    elif status == "no_urls":
+        status_emoji = "📭"
+        status_text = "No URLs configured"
+    else:
+        status_emoji = "❌"
+        status_text = f"Error: {status}"
+
+    # Build message
+    message = (
+        f"📋 *Last Run Status*\n\n"
+        f"🕐 *Started:* {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"🏁 *Finished:* {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"⏱ *Duration:* {last_run['duration_seconds']:.1f} seconds\n\n"
+        f"🌐 *URLs Checked:* {last_run['urls_checked']}\n"
+        f"🔄 *Changes Detected:* {last_run['changes_detected']}\n"
+        f"❗ *Errors:* {last_run['errors']}\n\n"
+        f"{status_emoji} *Status:* {status_text}"
+    )
+
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle /cancel command during conversation."""
     await update.message.reply_text("Authentication cancelled. Use /start to try again.")
@@ -448,6 +521,7 @@ def main() -> None:
     application.add_handler(CommandHandler("subscribe", subscribe))
     application.add_handler(CommandHandler("unsubscribe", unsubscribe))
     application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("logs", logs))
     application.add_handler(CommandHandler("logout", logout))
 
     # Start the bot
