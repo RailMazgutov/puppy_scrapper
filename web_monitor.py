@@ -15,6 +15,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 
+# Import telegram notifier for sending change notifications
+try:
+    from telegram_notifier import notify_change
+    TELEGRAM_ENABLED = True
+except ImportError:
+    TELEGRAM_ENABLED = False
+
 # Get the script's directory for resolving relative paths
 SCRIPT_DIR = Path(__file__).parent.resolve()
 DEFAULT_URLS_FILE = SCRIPT_DIR / "urls.txt"
@@ -96,9 +103,18 @@ class WebPageMonitor:
                 print("  ✅ No changes detected")
             else:
                 print("  ⚠️  CHANGES DETECTED!")
-                self._take_screenshot(page, filename)
+                screenshot_path = self._take_screenshot(page, filename)
                 self._save_html(filename, current_html)
                 print(f"  💾 Updated HTML snapshot saved")
+
+                # Send Telegram notification to all subscribers
+                if TELEGRAM_ENABLED:
+                    print("  📤 Sending Telegram notifications...")
+                    notified_count = notify_change(url, screenshot_path)
+                    if notified_count > 0:
+                        print(f"  ✅ Notified {notified_count} subscriber(s)")
+                    else:
+                        print("  ℹ️  No subscribers to notify")
 
             page.close()
 
