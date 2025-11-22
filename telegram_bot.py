@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""
+Telegram Bot for managing URL monitoring list.
+
+This bot allows authenticated users to add or remove URLs from the urls.txt file
+used by the web_monitor.py script.
+
+Usage:
+    python telegram_bot.py
+
+Configuration:
+    Create a telegram_config.json file with:
+    {
+        "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+        "access_password": "YOUR_SECRET_PASSWORD"
+    }
+"""
+
+import json
+import logging
+import os
+import re
+from pathlib import Path
+from typing import Set
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+
+# Configure logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+# Paths
+SCRIPT_DIR = Path(__file__).parent.resolve()
+CONFIG_FILE = SCRIPT_DIR / "telegram_config.json"
+URLS_FILE = SCRIPT_DIR / "urls.txt"
+
+# Conversation states
+WAITING_PASSWORD = 0
+
+# Store authenticated user IDs
+authenticated_users: Set[int] = set()
+
+
+def load_config() -> dict:
+    """Load configuration from telegram_config.json."""
+    if not CONFIG_FILE.exists():
+        raise FileNotFoundError(
+            f"Configuration file not found: {CONFIG_FILE}\n"
+            f"Please create it from telegram_config.json.example"
+        )
+
+    with open(CONFIG_FILE, "r") as f:
+        config = json.load(f)
+
+    if not config.get("bot_token"):
+        raise ValueError("bot_token is required in configuration")
+    if not config.get("access_password"):
+        raise ValueError("access_password is required in configuration")
+
+    return config
+
+
+def load_urls() -> list[str]:
+    """Load URLs from urls.txt file."""
+    if not URLS_FILE.exists():
+        return []
+
+    urls = []
+    with open(URLS_FILE, "r") as f:
+        for line in f:
+            line = line.strip()
+            # Skip empty lines and comments
+            if line and not line.startswith("#"):
+                urls.append(line)
+    return urls
+
+
+def save_urls(urls: list[str], preserve_header: bool = True) -> None:
+    """Save URLs to urls.txt file, preserving the header comments."""
+    header = """# URL Configuration File for Web Page Monitor
+# Add one URL per line
+# Lines starting with # are comments and will be ignored
+# Empty lines are also ignored
+
+# URLs to monitor:
+"""
+
+    with open(URLS_FILE, "w") as f:
+        if preserve_header:
+            f.write(header)
+        for url in urls:
+            f.write(f"{url}\n")
+
+
+def is_valid_url(url: str) -> bool:
+    """Check if a string is a valid HTTP/HTTPS URL."""
+    pattern = re.compile(
+        r'^https?://'  # http:// or https://
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domain
+        r'localhost|'  # localhost
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # or IP
+        r'(?::\d+)?'  # optional port
+        r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+    return bool(pattern.match(url))
+
+
+def is_authenticated(user_id: int) -> bool:
+    """Check if a user is authenticated."""
+    return user_id in authenticated_users
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle /start command - begin authentication."""
+    user_id = update.effective_user.id
+
+    if is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are already authenticated!\n\n"
+            "Available commands:\n"
+            "/list - Show all monitored URLs\n"
+            "/add <url> - Add a new URL to monitor\n"
+            "/remove <url> - Remove a URL from monitoring\n"
+            "/help - Show this help message\n"
+            "/logout - Log out from the bot"
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "Welcome to the URL Monitor Bot!\n\n"
+        "Please enter the access password to authenticate:"
+    )
+    return WAITING_PASSWORD
+
+
+async def authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle password authentication."""
+    user_id = update.effective_user.id
+    password = update.message.text.strip()
+
+    # Delete the password message for security
+    try:
+        await update.message.delete()
+    except Exception:
+        pass  # May fail if bot doesn't have delete permission
+
+    config = load_config()
+
+    if password == config["access_password"]:
+        authenticated_users.add(user_id)
+        logger.info(f"User {user_id} authenticated successfully")
+        await update.message.reply_text(
+            "Authentication successful!\n\n"
+            "Available commands:\n"
+            "/list - Show all monitored URLs\n"
+            "/add <url> - Add a new URL to monitor\n"
+            "/remove <url> - Remove a URL from monitoring\n"
+            "/help - Show this help message\n"
+            "/logout - Log out from the bot"
+        )
+        return ConversationHandler.END
+    else:
+        logger.warning(f"Failed authentication attempt from user {user_id}")
+        await update.message.reply_text(
+            "Invalid password. Please try again with /start"
+        )
+        return ConversationHandler.END
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /help command."""
+    user_id = update.effective_user.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    await update.message.reply_text(
+        "URL Monitor Bot - Help\n\n"
+        "Commands:\n"
+        "/list - Show all monitored URLs\n"
+        "/add <url> - Add a new URL to monitor\n"
+        "  Example: /add https://example.com\n"
+        "/remove <url> - Remove a URL from monitoring\n"
+        "  Example: /remove https://example.com\n"
+        "/help - Show this help message\n"
+        "/logout - Log out from the bot\n\n"
+        "Note: URLs must start with http:// or https://"
+    )
+
+
+async def list_urls(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /list command - show all monitored URLs."""
+    user_id = update.effective_user.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    urls = load_urls()
+
+    if not urls:
+        await update.message.reply_text("No URLs are currently being monitored.")
+        return
+
+    message = "Monitored URLs:\n\n"
+    for i, url in enumerate(urls, 1):
+        message += f"{i}. {url}\n"
+
+    await update.message.reply_text(message)
+
+
+async def add_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /add command - add a new URL to monitor."""
+    user_id = update.effective_user.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Please provide a URL to add.\n"
+            "Usage: /add <url>\n"
+            "Example: /add https://example.com"
+        )
+        return
+
+    url = context.args[0].strip()
+
+    if not is_valid_url(url):
+        await update.message.reply_text(
+            "Invalid URL format. URL must start with http:// or https://\n"
+            "Example: /add https://example.com"
+        )
+        return
+
+    urls = load_urls()
+
+    if url in urls:
+        await update.message.reply_text(f"URL is already in the monitoring list:\n{url}")
+        return
+
+    urls.append(url)
+    save_urls(urls)
+
+    logger.info(f"User {user_id} added URL: {url}")
+    await update.message.reply_text(f"URL added successfully:\n{url}")
+
+
+async def remove_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /remove command - remove a URL from monitoring."""
+    user_id = update.effective_user.id
+
+    if not is_authenticated(user_id):
+        await update.message.reply_text(
+            "You are not authenticated. Please use /start to authenticate."
+        )
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Please provide a URL to remove.\n"
+            "Usage: /remove <url>\n"
+            "Example: /remove https://example.com\n\n"
+            "Use /list to see all monitored URLs."
+        )
+        return
+
+    url = context.args[0].strip()
+    urls = load_urls()
+
+    if url not in urls:
+        await update.message.reply_text(
+            f"URL not found in the monitoring list:\n{url}\n\n"
+            "Use /list to see all monitored URLs."
+        )
+        return
+
+    urls.remove(url)
+    save_urls(urls)
+
+    logger.info(f"User {user_id} removed URL: {url}")
+    await update.message.reply_text(f"URL removed successfully:\n{url}")
+
+
+async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /logout command - log out the user."""
+    user_id = update.effective_user.id
+
+    if user_id in authenticated_users:
+        authenticated_users.remove(user_id)
+        logger.info(f"User {user_id} logged out")
+        await update.message.reply_text(
+            "You have been logged out. Use /start to authenticate again."
+        )
+    else:
+        await update.message.reply_text("You are not currently logged in.")
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle /cancel command during conversation."""
+    await update.message.reply_text("Authentication cancelled. Use /start to try again.")
+    return ConversationHandler.END
+
+
+def main() -> None:
+    """Start the bot."""
+    # Load configuration
+    try:
+        config = load_config()
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(f"Configuration error: {e}")
+        print(f"Error: {e}")
+        return
+
+    # Create the Application
+    application = Application.builder().token(config["bot_token"]).build()
+
+    # Add conversation handler for authentication
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            WAITING_PASSWORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, authenticate)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Add handlers
+    application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("list", list_urls))
+    application.add_handler(CommandHandler("add", add_url))
+    application.add_handler(CommandHandler("remove", remove_url))
+    application.add_handler(CommandHandler("logout", logout))
+
+    # Start the bot
+    logger.info("Starting URL Monitor Telegram Bot...")
+    print("Bot is running. Press Ctrl+C to stop.")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()

@@ -19,6 +19,9 @@ html_snapshots/
 monitor.log
 cron.log
 
+# Telegram bot config (contains secrets)
+telegram_config.json
+
 # IDE
 .vscode/
 .idea/
